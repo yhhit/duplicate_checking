@@ -1,0 +1,21 @@
+# --- Web 框架与服务器 ---
+fastapi>=0.100.0
+uvicorn[standard]>=0.20.0
+python-multipart          # 必装：用于支持 FastAPI 的文件上传 (UploadFile)
+
+# --- 数据库与 ORM ---
+tortoise-orm>=0.20.0
+asyncmy>=0.2.5            # 必装：Tortoise ORM 的高性能异步 MySQL 驱动
+aerich>=0.7.0             # 推荐：Tortoise ORM 的数据库迁移工具 (类似 Alembic)
+
+# --- 配置与验证 ---
+pydantic>=2.0.0
+pydantic-settings>=2.0.0  # 用于 config.py 中的 BaseSettings
+python-dotenv>=1.0.0      # 用于加载 .env 文件
+
+# --- 算法与工具 ---
+simhash                   # 如果你决定使用现成的库而不是手写算法
+# numpy                   # 可选：如果你未来需要做更复杂的矩阵运算
+
+# --- AI 接口 (根据你的字段推测) ---
+openai>=1.0.0             # 用于调用 LLM 生成代码
