@@ -86,3 +86,39 @@ class CodeFingerprint(models.Model):
 
     class Meta:
         table = "code_fingerprints"
+
+# models_fingerprint.py（或直接放 models.py）
+from tortoise import fields, models
+
+class CodePosting(models.Model):
+    id = fields.BigIntField(pk=True)
+    fp = fields.BigIntField(index=True, description="winnowing fingerprint (64-bit int)")
+    order = fields.ForeignKeyField("model.CodeOrder", related_name="postings", index=True)
+
+    # 指纹在归一化 token 序列中的位置（用于拼接连续命中片段）
+    pos = fields.IntField(description="token position")
+
+    # 证据用：落在原始代码的行范围（粗粒度即可）
+    start_line = fields.IntField()
+    end_line = fields.IntField()
+
+    class Meta:
+        table = "code_postings"
+        indexes = (
+            ("fp", "order_id"),   # 倒排扫描后可快速按 order 聚合
+            ("order_id", "pos"),  # 精排时按位置取片段
+        )
+        # 如果你用 PostgreSQL，后续可考虑 fp 用 BIGINT + 分区/哈希分片（量大时）
+
+class CodeDocStat(models.Model):
+    """
+    可选：存每个 order 的指纹数量、token数量，方便算覆盖率/比例并做过滤
+    """
+    order = fields.OneToOneField("model.CodeOrder", related_name="doc_stat", pk=True)
+    fp_count = fields.IntField()
+    token_count = fields.IntField()
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "code_doc_stats"
+        indexes = (("fp_count",),)

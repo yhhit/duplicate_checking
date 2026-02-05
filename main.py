@@ -13,6 +13,169 @@ from config import settings
 app = FastAPI(title="Code Duplicate Checker")
 engine = SimHashEngine()
 
+
+# main.py 里新增 imports
+from collections import Counter, defaultdict
+from tortoise.transactions import in_transaction
+
+from winnowing_utils import normalize_to_tokens_with_lines, winnow
+
+MAX_QUERY_FPS = 1200
+RECALL_BATCH = 300
+TOP_N = 80
+MIN_HIT = 6
+MIN_COVERAGE = 0.06
+K = 35
+WINDOW = 10
+
+def table_for_shard(shard: int) -> str:
+    return f"code_postings_{shard:02x}"
+
+def merge_intervals(intervals):
+    intervals = sorted(intervals)
+    merged = []
+    for s, e in intervals:
+        if not merged or s > merged[-1][1] + 1:
+            merged.append([s, e])
+        else:
+            merged[-1][1] = max(merged[-1][1], e)
+    return [(a, b) for a, b in merged]
+
+def chunked(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i+n]
+
+@app.post("/api/duplicate-check-v2")
+async def duplicate_check_v2(file: UploadFile = File(...), top_n: int = TOP_N):
+    code = (await file.read()).decode("utf-8", errors="ignore")
+    total_lines = len(code.splitlines())
+
+    tokens, token_lines = normalize_to_tokens_with_lines(code)
+    in_fps = winnow(tokens, token_lines, k=K, window=WINDOW)
+    if not in_fps:
+        return {"filename": file.filename, "total_lines": total_lines, "duplicate_rate": "0.00%", "details": []}
+
+    # Cap query fps
+    if len(in_fps) > MAX_QUERY_FPS:
+        step = max(1, len(in_fps) // MAX_QUERY_FPS)
+        in_fps = in_fps[::step][:MAX_QUERY_FPS]
+
+    fp_values = [f.fp for f in in_fps]
+
+    # Build input index: fp -> list of Fingerprint
+    in_by_fp = defaultdict(list)
+    for f in in_fps:
+        in_by_fp[f.fp].append(f)
+
+    # group fps by shard
+    fps_by_shard = defaultdict(list)
+    for fp in fp_values:
+        fps_by_shard[fp & 0x3F].append(fp)
+
+    # 1) recall: order_id -> hit count
+    hits = defaultdict(int)
+    async with in_transaction() as conn:
+        for shard, fps in fps_by_shard.items():
+            tbl = table_for_shard(shard)
+            for sub in chunked(fps, RECALL_BATCH):
+                ph = ",".join(["%s"] * len(sub))
+                sql = f"""
+                    SELECT order_id, COUNT(*) AS hit
+                    FROM {tbl}
+                    WHERE fp IN ({ph})
+                    GROUP BY order_id
+                """
+                rows = await conn.execute_query_dict(sql, sub)
+                for r in rows:
+                    hits[int(r["order_id"])] += int(r["hit"])
+
+    if not hits:
+        return {"filename": file.filename, "total_lines": total_lines, "duplicate_rate": "0.00%", "details": []}
+
+    # Pick top candidates
+    candidates = [oid for oid, _ in sorted(hits.items(), key=lambda x: x[1], reverse=True)[:top_n]]
+
+    details = []
+    suspicious_input_intervals = []
+
+    # 2) rerank + evidence per candidate
+    for oid in candidates:
+        # Pull matched postings for this order, across shards.
+        postings = []
+        async with in_transaction() as conn:
+            for shard, fps in fps_by_shard.items():
+                tbl = table_for_shard(shard)
+                for sub in chunked(fps, RECALL_BATCH):
+                    ph = ",".join(["%s"] * len(sub))
+                    sql = f"""
+                        SELECT fp, pos, start_line, end_line
+                        FROM {tbl}
+                        WHERE order_id=%s AND fp IN ({ph})
+                    """
+                    rows = await conn.execute_query_dict(sql, [oid] + sub)
+                    postings.extend(rows)
+
+        if len(postings) < MIN_HIT:
+            continue
+
+        # offset alignment
+        offset_counter = Counter()
+        pairs = []
+        for p in postings:
+            fp = int(p["fp"])
+            for inf in in_by_fp.get(fp, []):
+                off = int(p["pos"]) - inf.pos
+                offset_counter[off] += 1
+                pairs.append((off, inf, p))
+
+        if not offset_counter:
+            continue
+
+        best_off, best_cnt = offset_counter.most_common(1)[0]
+        if best_cnt < MIN_HIT:
+            continue
+
+        in_intervals = []
+        db_intervals = []
+        for off, inf, p in pairs:
+            if off != best_off:
+                continue
+            in_intervals.append((inf.start_line, inf.end_line))
+            db_intervals.append((int(p["start_line"]), int(p["end_line"])))
+
+        in_merged = merge_intervals(in_intervals)
+        db_merged = merge_intervals(db_intervals)
+
+        covered = sum(e - s + 1 for s, e in in_merged)
+        coverage = covered / total_lines if total_lines else 0.0
+        if coverage < MIN_COVERAGE:
+            continue
+
+        order = await CodeOrder.get(id=oid)
+        suspicious_input_intervals.extend(in_merged)
+
+        details.append({
+            "match_order_id": oid,
+            "match_project": order.project_name,
+            "hit_fingerprints": int(best_cnt),
+            "coverage": f"{coverage*100:.2f}%",
+            "evidence": [
+                {"input_lines": f"{s1}-{e1}", "match_lines": f"{s2}-{e2}"}
+                for (s1, e1), (s2, e2) in list(zip(in_merged, db_merged))[:10]
+            ],
+        })
+
+    merged_all = merge_intervals(suspicious_input_intervals)
+    covered_all = sum(e - s + 1 for s, e in merged_all)
+    dup_rate = covered_all / total_lines if total_lines else 0.0
+
+    return {
+        "filename": file.filename,
+        "total_lines": total_lines,
+        "duplicate_rate": f"{dup_rate*100:.2f}%",
+        "details": details[:20],
+    }
+
 @app.post("/api/duplicate-check")
 async def check_duplicate(file: UploadFile = File(...)):
     """
