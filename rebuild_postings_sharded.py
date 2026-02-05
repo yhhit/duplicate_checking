@@ -2,7 +2,7 @@
 import asyncio
 from tortoise import Tortoise, run_async
 from tortoise.transactions import in_transaction
-
+from winnowing_utils import shard_fp
 from config import settings
 from models import CodeOrder, OrderStatus
 from winnowing_utils import normalize_to_tokens_with_lines, winnow, group_fps_by_shard
@@ -69,7 +69,7 @@ async def rebuild():
 
             fps_by_shard = {}
             for f in fps:
-                fps_by_shard.setdefault(f.fp & 0x3F, []).append(f)
+                fps_by_shard.setdefault(shard_fp(f.fp), []).append(f)
 
             async with in_transaction() as conn:
                 # Delete only shards we will write into.

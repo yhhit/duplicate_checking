@@ -77,6 +77,25 @@ def normalize_to_tokens_with_lines(code: str) -> Tuple[List[str], List[int]]:
 
     return tokens, lines
 
+MASK64 = (1 << 64) - 1
+SIGN_BIT = 1 << 63
+
+def to_int64(u: int) -> int:
+    """Map 0..2^64-1 -> signed int64 range."""
+    u &= MASK64
+    return u - (1 << 64) if (u & SIGN_BIT) else u
+
+def _hash64(s: str) -> int:
+    h = hashlib.blake2b(s.encode("utf-8"), digest_size=8).digest()
+    u = int.from_bytes(h, "big", signed=False)
+    return to_int64(u)
+
+def shard_fp(fp: int) -> int:
+    # fp is signed; convert back to 64-bit unsigned space for sharding
+    u = fp & MASK64
+    return u & 0x3F
+
+
 def _hash64(s: str) -> int:
     # stable 64-bit hash
     h = hashlib.blake2b(s.encode("utf-8"), digest_size=8).digest()
