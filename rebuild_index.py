@@ -9,6 +9,7 @@ async def init():
         db_url=settings.DATABASE_URL,
         modules={"model": ["models"]}
     )
+    await Tortoise.generate_schemas(safe=True)
 
 async def rebuild():
     await init()

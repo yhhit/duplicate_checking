@@ -1,12 +1,16 @@
-# main.py
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import time
+import uvicorn
+from fastapi import FastAPI, UploadFile, File
 from tortoise.contrib.fastapi import register_tortoise
+from tortoise.expressions import Q
+
+# 导入你项目中的模块
+# 确保 models.py, config.py, fingerprint_utils.py 在同一目录下
 from models import CodeOrder, CodeFingerprint
 from fingerprint_utils import SimHashEngine, split_code_into_chunks
 from config import settings
-import time
-from tortoise.expressions import Q
-app = FastAPI()
+
+app = FastAPI(title="Code Duplicate Checker")
 engine = SimHashEngine()
 
 @app.post("/api/duplicate-check")
@@ -16,6 +20,7 @@ async def check_duplicate(file: UploadFile = File(...)):
     """
     start_time = time.time()
     content_bytes = await file.read()
+    
     try:
         code_content = content_bytes.decode('utf-8')
     except UnicodeDecodeError:
@@ -26,28 +31,38 @@ async def check_duplicate(file: UploadFile = File(...)):
     
     report = []
     total_suspicious_lines = set()
-
+    
+    # 2. 逐个块进行比对
     for chunk in input_chunks:
         chunk_hash = engine.compute_simhash(chunk['content'])
+        
+        # 切分指纹用于索引查询
         parts = engine.split_fingerprint_to_parts(chunk_hash)
         
-        # 【优化查询】只查找命中任意一段的记录
-        # 这一步利用了数据库索引，极大减少了需要计算海明距离的数量
+        # 【核心优化】利用数据库索引快速筛选候选集
+        # 查找任意一段指纹(part_1...part_4)相同的记录
         candidates = await CodeFingerprint.filter(
             Q(part_1=parts[0]) | 
             Q(part_2=parts[1]) | 
             Q(part_3=parts[2]) | 
             Q(part_4=parts[3])
-        ).values('fingerprint', 'order_id', 'order__project_name', 'start_line', 'end_line')
+        ).values(
+            'fingerprint', 
+            'order_id', 
+            'order__project_name', 
+            'start_line', 
+            'end_line'
+        )
         
         best_match = None
-        min_dist = 100 # 初始化一个大值
+        min_dist = 100
         
-        # 在候选集中精细计算距离
+        # 在候选集中精算海明距离
         for db_fp in candidates:
             dist = engine.hamming_distance(chunk_hash, db_fp['fingerprint'])
             
-            if dist <= 3: # 阈值
+            # 阈值判定：海明距离 <= 3 视为高度相似
+            if dist <= 3:
                 if dist < min_dist:
                     min_dist = dist
                     best_match = db_fp
@@ -59,7 +74,7 @@ async def check_duplicate(file: UploadFile = File(...)):
                 "match_project": best_match['order__project_name'],
                 "match_order_id": best_match['order_id'],
                 "match_lines": f"{best_match['start_line']} - {best_match['end_line']}",
-                "similarity_score": f"{(1 - min_dist/64)*100:.1f}%" # 简单估算
+                "similarity_score": f"{(1 - min_dist/64)*100:.1f}%"
             }
             report.append(match_info)
             
@@ -67,7 +82,7 @@ async def check_duplicate(file: UploadFile = File(...)):
             for i in range(chunk['start_line'], chunk['end_line'] + 1):
                 total_suspicious_lines.add(i)
 
-    # 4. 计算统计数据
+    # 3. 计算统计数据
     total_lines = len(code_content.split('\n'))
     duplicate_rate = len(total_suspicious_lines) / total_lines if total_lines > 0 else 0
 
@@ -76,14 +91,23 @@ async def check_duplicate(file: UploadFile = File(...)):
         "total_lines": total_lines,
         "duplicate_rate": f"{duplicate_rate * 100:.2f}%",
         "process_time": f"{time.time() - start_time:.2f}s",
-        "details": report[:50] # 只返回前50条重复记录，避免包体过大
+        "details": report[:50] # 只返回前50条详情
     }
 
-# 注册数据库 (根据你的 config.py)
+# 注册 Tortoise ORM
 register_tortoise(
     app,
     db_url=settings.DATABASE_URL,
-    modules={"model": ["models"]}, # 确保这里的模块路径正确
+    modules={"model": ["models"]}, 
     generate_schemas=True,
     add_exception_handlers=True,
 )
+
+# --- 这里是关键：添加启动入口 ---
+if __name__ == "__main__":
+    # 使用 uvicorn 启动应用
+    # host="0.0.0.0" 允许局域网访问
+    # port=8000 默认端口
+    # reload=True 代码修改后自动重启 (仅开发模式推荐)
+    print("启动查重服务: http://127.0.0.1:8003/docs")
+    uvicorn.run("main:app", host="127.0.0.1", port=8003, reload=True)
