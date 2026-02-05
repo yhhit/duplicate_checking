@@ -110,4 +110,4 @@ if __name__ == "__main__":
     # port=8000 默认端口
     # reload=True 代码修改后自动重启 (仅开发模式推荐)
     print("启动查重服务: http://127.0.0.1:8003/docs")
-    uvicorn.run("main:app", host="127.0.0.1", port=8003, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8003, reload=True)
