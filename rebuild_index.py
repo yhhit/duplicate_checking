@@ -42,15 +42,10 @@ async def rebuild_fast():
     while True:
         # 2. 批量获取未处理的订单 (利用主键索引，速度极快)
         # 逻辑：获取 ID 比 last_id 大的已完成订单，限制数量
-        # orders = await CodeOrder.filter(
-        #     id__gt=last_id, 
-        #     status=OrderStatus.COMPLETED
-        # ).order_by("id").limit(BATCH_SIZE).all()
         orders = await CodeOrder.filter(
-            id__gt=last_id,
-            id__lte=50000,          # 先跑 5w
-            status=OrderStatus.COMPLETED,
-        ).order_by("id").limit(BATCH_SIZE)
+            id__gt=last_id, 
+            status=OrderStatus.COMPLETED
+        ).order_by("id").limit(BATCH_SIZE).all()
 
         if not orders:
             print("所有订单已处理完毕。")

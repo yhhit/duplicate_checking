@@ -42,6 +42,7 @@ async def rebuild():
     while True:
         orders = await CodeOrder.filter(
             id__gt=last_id,
+            id__lte=50000,          # 先跑 5w
             status=OrderStatus.COMPLETED,
         ).order_by("id").limit(BATCH_SIZE)
 
