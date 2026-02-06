@@ -6,16 +6,11 @@ from config import settings
 from models import CodeOrder, OrderStatus
 from winnowing_utils import normalize_to_tokens_with_lines, winnow, group_fps_by_shard
 from winnowing_utils import normalize_to_tokens_with_lines, winnow, shard_of_fp
-BATCH_SIZE = 20
-
-# Control storage: cap fingerprints per order to avoid extreme docs blowing up storage.
-MAX_FPS_PER_DOC = 5000
-
 BATCH_SIZE = 10
-MAX_FPS_PER_DOC = 1200
+MAX_FPS_PER_DOC = 10000
 INSERT_BATCH = 300
-K = 35
-WINDOW = 10
+K = 20
+WINDOW = 5
 
 def table_for_shard(shard: int) -> str:
     return f"code_postings_{shard:02x}"

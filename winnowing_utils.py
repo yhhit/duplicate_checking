@@ -100,7 +100,7 @@ def _hash64_signed(s: str) -> int:
 def _kgram_hash(tokens: List[str], start: int, k: int) -> int:
     return _hash64_signed("\x1f".join(tokens[start:start + k]))
 
-def winnow(tokens: List[str], token_lines: List[int], k: int = 35, window: int = 10) -> List[Fingerprint]:
+def winnow(tokens: List[str], token_lines: List[int], k: int = 20, window: int = 5) -> List[Fingerprint]:
     if len(tokens) < k:
         return []
 

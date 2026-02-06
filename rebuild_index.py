@@ -63,7 +63,7 @@ async def rebuild_fast():
                 continue
 
             # 这里的业务逻辑不变
-            chunks = split_code_into_chunks(order.generated_code, window_size=15, step=10)
+            chunks = split_code_into_chunks(order.generated_code, window_size=10, step=5)
             
             for chunk in chunks:
                 f_val = engine.compute_simhash(chunk['content'])

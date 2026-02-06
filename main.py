@@ -21,13 +21,13 @@ from tortoise.transactions import in_transaction
 
 from winnowing_utils import normalize_to_tokens_with_lines, winnow
 
-MAX_QUERY_FPS = 1200
+MAX_QUERY_FPS = 10000
 RECALL_BATCH = 300
 TOP_N = 80
 MIN_HIT = 6
 MIN_COVERAGE = 0.06
-K = 35
-WINDOW = 10
+K = 20
+WINDOW = 5
 
 def table_for_shard(shard: int) -> str:
     return f"code_postings_{shard:02x}"
@@ -206,7 +206,7 @@ async def check_duplicate(file: UploadFile = File(...)):
         return {"error": "文件编码格式错误，请上传 UTF-8 文本文件"}
 
     # 1. 将上传的代码切片
-    input_chunks = split_code_into_chunks(code_content, window_size=15, step=10)
+    input_chunks = split_code_into_chunks(code_content, window_size=10, step=5)
     
     report = []
     total_suspicious_lines = set()

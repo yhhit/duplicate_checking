@@ -77,7 +77,7 @@ class SimHashEngine:
         x = int(hash1_bin, 2) ^ int(hash2_bin, 2)
         return bin(x).count('1')
 
-def split_code_into_chunks(code: str, window_size=20, step=10):
+def split_code_into_chunks(code: str, window_size=10, step=5):
     """
     滑动窗口切分代码。
     window_size: 每个块包含多少行 (例如20行)
