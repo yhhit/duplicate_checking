@@ -3,6 +3,7 @@ import uvicorn
 from fastapi import FastAPI, UploadFile, File
 from tortoise.contrib.fastapi import register_tortoise
 from tortoise.expressions import Q
+from typing import Optional
 from winnowing_utils import normalize_to_tokens_with_lines, winnow, shard_of_fp
 # 导入你项目中的模块
 # 确保 models.py, config.py, fingerprint_utils.py 在同一目录下
@@ -46,7 +47,14 @@ def chunked(lst, n):
         yield lst[i:i+n]
 
 @app.post("/api/duplicate-check-v2")
-async def duplicate_check_v2(file: UploadFile = File(...), top_n: int = TOP_N):
+async def duplicate_check_v2(
+    file: UploadFile = File(...),
+    top_n: int = TOP_N,
+    exclude_order_ids: Optional[str] = None,  # 例如 "12,34,56"
+):
+    exclude_set = set()
+    if exclude_order_ids:
+        exclude_set = {int(x) for x in exclude_order_ids.split(",") if x.strip().isdigit()}
     code = (await file.read()).decode("utf-8", errors="ignore")
     total_lines = len(code.splitlines())
 
@@ -87,19 +95,27 @@ async def duplicate_check_v2(file: UploadFile = File(...), top_n: int = TOP_N):
                 """
                 rows = await conn.execute_query_dict(sql, sub)
                 for r in rows:
-                    hits[int(r["order_id"])] += int(r["hit"])
+                    oid = int(r["order_id"])
+                    if oid in exclude_set:
+                        continue
+                    hits[oid] += int(r["hit"])
 
     if not hits:
         return {"filename": file.filename, "total_lines": total_lines, "duplicate_rate": "0.00%", "details": []}
 
     # Pick top candidates
-    candidates = [oid for oid, _ in sorted(hits.items(), key=lambda x: x[1], reverse=True)[:top_n]]
+    candidates = [
+        oid for oid, _ in sorted(hits.items(), key=lambda x: x[1], reverse=True)
+        if oid not in exclude_set
+    ][:top_n]
 
     details = []
     suspicious_input_intervals = []
 
     # 2) rerank + evidence per candidate
     for oid in candidates:
+        if oid in exclude_set:
+            continue
         # Pull matched postings for this order, across shards.
         postings = []
         async with in_transaction() as conn:
