@@ -2,7 +2,6 @@
 import asyncio
 from tortoise import Tortoise, run_async
 from tortoise.transactions import in_transaction
-from winnowing_utils import shard_fp
 from config import settings
 from models import CodeOrder, OrderStatus
 from winnowing_utils import normalize_to_tokens_with_lines, winnow, group_fps_by_shard
