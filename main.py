@@ -3,7 +3,7 @@ import uvicorn
 from fastapi import FastAPI, UploadFile, File
 from tortoise.contrib.fastapi import register_tortoise
 from tortoise.expressions import Q
-from winnowing_utils import shard_fp
+from winnowing_utils import normalize_to_tokens_with_lines, winnow, shard_of_fp
 # 导入你项目中的模块
 # 确保 models.py, config.py, fingerprint_utils.py 在同一目录下
 from models import CodeOrder, CodeFingerprint
@@ -70,7 +70,7 @@ async def duplicate_check_v2(file: UploadFile = File(...), top_n: int = TOP_N):
     # group fps by shard
     fps_by_shard = defaultdict(list)
     for fp in fp_values:
-        fps_by_shard[shard_fp(fp)].append(fp)
+        fps_by_shard[shard_of_fp(fp)].append(fp)
 
     # 1) recall: order_id -> hit count
     hits = defaultdict(int)
