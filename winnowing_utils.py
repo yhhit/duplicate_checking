@@ -4,14 +4,33 @@ import hashlib
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Tuple
 
+MASK64 = (1 << 64) - 1
+SIGN_BIT = 1 << 63
+
+def to_uint64(x: int) -> int:
+    return x & MASK64
+
+def to_int64(x: int) -> int:
+    """
+    Map any int to signed int64 range [-2^63, 2^63-1] using 2's complement.
+    """
+    u = x & MASK64
+    return u - (1 << 64) if (u & SIGN_BIT) else u
+
+def shard_of_fp(fp_int64: int) -> int:
+    """
+    fp is stored/transferred as signed int64.
+    For sharding we interpret it as uint64 and take low 6 bits.
+    """
+    return (fp_int64 & MASK64) & 0x3F  # 0..63
+
 @dataclass(frozen=True)
 class Fingerprint:
-    fp: int
+    fp: int          # signed int64
     pos: int
     start_line: int
     end_line: int
 
-# Coarse keyword set for Python/Java/JS. Keeps structure tokens stable under renaming.
 _KEYWORDS = {
     "if","else","elif","for","while","return","break","continue",
     "try","except","finally","catch","throw",
@@ -30,13 +49,6 @@ _ID_RE = re.compile(r"\b[a-zA-Z_]\w*\b")
 _OP_RE = re.compile(r"==|!=|<=|>=|\+\+|--|\+=|-=|\*=|/=|&&|\|\||[+\-*/%<>=!(){}\[\].,;:]")
 
 def normalize_to_tokens_with_lines(code: str) -> Tuple[List[str], List[int]]:
-    """
-    Minimal cross-language token normalization:
-    - removes //, /* */, # comments (best-effort)
-    - normalizes strings->STR, numbers->NUM, identifiers->ID (keeps keywords)
-    - keeps operators/punctuations as tokens
-    Returns: (tokens, token_line_numbers)
-    """
     code = re.sub(r"/\*.*?\*/", " ", code, flags=re.DOTALL)
     code = re.sub(r"//.*", " ", code)
     code = re.sub(r"#.*", " ", code)
@@ -77,34 +89,18 @@ def normalize_to_tokens_with_lines(code: str) -> Tuple[List[str], List[int]]:
 
     return tokens, lines
 
-MASK64 = (1 << 64) - 1
-SIGN_BIT = 1 << 63
-
-def to_int64(u: int) -> int:
-    """Map 0..2^64-1 -> signed int64 range."""
-    u &= MASK64
-    return u - (1 << 64) if (u & SIGN_BIT) else u
-
-def _hash64(s: str) -> int:
-    h = hashlib.blake2b(s.encode("utf-8"), digest_size=8).digest()
-    u = int.from_bytes(h, "big", signed=False)
+def _hash64_signed(s: str) -> int:
+    """
+    stable 64-bit hash, returned as signed int64 (fits MySQL BIGINT and asyncmy)
+    """
+    b = hashlib.blake2b(s.encode("utf-8"), digest_size=8).digest()
+    u = int.from_bytes(b, "big", signed=False)  # 0..2^64-1
     return to_int64(u)
 
-def shard_fp(fp: int) -> int:
-    # fp is signed; convert back to 64-bit unsigned space for sharding
-    u = fp & MASK64
-    return u & 0x3F
-
-
-def _hash64(s: str) -> int:
-    # stable 64-bit hash
-    h = hashlib.blake2b(s.encode("utf-8"), digest_size=8).digest()
-    return int.from_bytes(h, "big", signed=False)
-
 def _kgram_hash(tokens: List[str], start: int, k: int) -> int:
-    return _hash64("\x1f".join(tokens[start:start + k]))
+    return _hash64_signed("\x1f".join(tokens[start:start + k]))
 
-def winnow(tokens: List[str], token_lines: List[int], k: int = 25, window: int = 6) -> List[Fingerprint]:
+def winnow(tokens: List[str], token_lines: List[int], k: int = 35, window: int = 10) -> List[Fingerprint]:
     if len(tokens) < k:
         return []
 
@@ -116,7 +112,7 @@ def winnow(tokens: List[str], token_lines: List[int], k: int = 25, window: int =
 
     for i in range(0, len(hashes) - window + 1):
         w = hashes[i:i + window]
-        min_val = min(w)
+        min_val = min(w)  # signed compare OK; stable as long as both sides use same function
         j = i + w.index(min_val)
 
         if j != last_idx or min_val != last_val:
@@ -128,12 +124,8 @@ def winnow(tokens: List[str], token_lines: List[int], k: int = 25, window: int =
 
     return fps
 
-def shard_fp(fp: int) -> int:
-    return fp & 0x3F  # 64 shards
-
 def group_fps_by_shard(fps: Iterable[int]) -> Dict[int, List[int]]:
     out: Dict[int, List[int]] = {}
     for fp in fps:
-        s = shard_fp(fp)
-        out.setdefault(s, []).append(fp)
+        out.setdefault(shard_of_fp(fp), []).append(fp)
     return out

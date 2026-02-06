@@ -6,7 +6,7 @@ from winnowing_utils import shard_fp
 from config import settings
 from models import CodeOrder, OrderStatus
 from winnowing_utils import normalize_to_tokens_with_lines, winnow, group_fps_by_shard
-
+from winnowing_utils import normalize_to_tokens_with_lines, winnow, shard_of_fp
 BATCH_SIZE = 20
 
 # Control storage: cap fingerprints per order to avoid extreme docs blowing up storage.
@@ -69,7 +69,7 @@ async def rebuild():
 
             fps_by_shard = {}
             for f in fps:
-                fps_by_shard.setdefault(shard_fp(f.fp), []).append(f)
+                fps_by_shard.setdefault(shard_of_fp(f.fp), []).append(f)
 
             async with in_transaction() as conn:
                 # Delete only shards we will write into.
