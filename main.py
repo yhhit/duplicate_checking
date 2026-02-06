@@ -1,4 +1,5 @@
 import time
+import asyncio
 import uvicorn
 from fastapi import FastAPI, UploadFile, File
 from tortoise.contrib.fastapi import register_tortoise
@@ -32,11 +33,14 @@ WINDOW = 5
 def table_for_shard(shard: int) -> str:
     return f"code_postings_{shard:02x}"
 
-def merge_intervals(intervals):
+def merge_intervals(intervals, epsilon=0):
+    if not intervals:
+        return []
     intervals = sorted(intervals)
     merged = []
     for s, e in intervals:
-        if not merged or s > merged[-1][1] + 1:
+        # epsilon 允许合并有微小间隙的片段
+        if not merged or s > merged[-1][1] + epsilon + 1:
             merged.append([s, e])
         else:
             merged[-1][1] = max(merged[-1][1], e)
@@ -55,7 +59,17 @@ async def duplicate_check_v2(
     exclude_set = set()
     if exclude_order_ids:
         exclude_set = {int(x) for x in exclude_order_ids.split(",") if x.strip().isdigit()}
-    code = (await file.read()).decode("utf-8", errors="ignore")
+    
+    # 升级：增加多编码支持
+    content_bytes = await file.read()
+    try:
+        code = content_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            code = content_bytes.decode("gbk")
+        except:
+            return {"error": "文件编码不支持，请使用 UTF-8 或 GBK"}
+            
     total_lines = len(code.splitlines())
 
     tokens, token_lines = normalize_to_tokens_with_lines(code)
@@ -80,25 +94,28 @@ async def duplicate_check_v2(
     for fp in fp_values:
         fps_by_shard[shard_of_fp(fp)].append(fp)
 
-    # 1) recall: order_id -> hit count
-    hits = defaultdict(int)
-    async with in_transaction() as conn:
-        for shard, fps in fps_by_shard.items():
-            tbl = table_for_shard(shard)
-            for sub in chunked(fps, RECALL_BATCH):
+    # 1) 升级：并行化召回 (Recall) 过程
+    async def query_shard_recall(shard, shard_fps):
+        tbl = table_for_shard(shard)
+        shard_hits = defaultdict(int)
+        async with in_transaction() as conn:
+            for sub in chunked(shard_fps, RECALL_BATCH):
                 ph = ",".join(["%s"] * len(sub))
-                sql = f"""
-                    SELECT order_id, COUNT(*) AS hit
-                    FROM {tbl}
-                    WHERE fp IN ({ph})
-                    GROUP BY order_id
-                """
+                sql = f"SELECT order_id, COUNT(*) AS hit FROM {tbl} WHERE fp IN ({ph}) GROUP BY order_id"
                 rows = await conn.execute_query_dict(sql, sub)
                 for r in rows:
                     oid = int(r["order_id"])
-                    if oid in exclude_set:
-                        continue
-                    hits[oid] += int(r["hit"])
+                    if oid not in exclude_set:
+                        shard_hits[oid] += int(r["hit"])
+        return shard_hits
+
+    tasks = [query_shard_recall(s, f) for s, f in fps_by_shard.items()]
+    shard_results = await asyncio.gather(*tasks)
+    
+    hits = defaultdict(int)
+    for res in shard_results:
+        for oid, count in res.items():
+            hits[oid] += count
 
     if not hits:
         return {"filename": file.filename, "total_lines": total_lines, "duplicate_rate": "0.00%", "details": []}
@@ -106,7 +123,6 @@ async def duplicate_check_v2(
     # Pick top candidates
     candidates = [
         oid for oid, _ in sorted(hits.items(), key=lambda x: x[1], reverse=True)
-        if oid not in exclude_set
     ][:top_n]
 
     details = []
@@ -116,20 +132,24 @@ async def duplicate_check_v2(
     for oid in candidates:
         if oid in exclude_set:
             continue
-        # Pull matched postings for this order, across shards.
+        
+        # 升级：对于单个候选者，也可以并行查询其指纹分布
         postings = []
-        async with in_transaction() as conn:
-            for shard, fps in fps_by_shard.items():
-                tbl = table_for_shard(shard)
-                for sub in chunked(fps, RECALL_BATCH):
+        async def query_shard_postings(shard, shard_fps):
+            tbl = table_for_shard(shard)
+            async with in_transaction() as conn:
+                shard_postings = []
+                for sub in chunked(shard_fps, RECALL_BATCH):
                     ph = ",".join(["%s"] * len(sub))
-                    sql = f"""
-                        SELECT fp, pos, start_line, end_line
-                        FROM {tbl}
-                        WHERE order_id=%s AND fp IN ({ph})
-                    """
+                    sql = f"SELECT fp, pos, start_line, end_line FROM {tbl} WHERE order_id=%s AND fp IN ({ph})"
                     rows = await conn.execute_query_dict(sql, [oid] + sub)
-                    postings.extend(rows)
+                    shard_postings.extend(rows)
+                return shard_postings
+
+        posting_tasks = [query_shard_postings(s, f) for s, f in fps_by_shard.items()]
+        posting_results = await asyncio.gather(*posting_tasks)
+        for res in posting_results:
+            postings.extend(res)
 
         if len(postings) < MIN_HIT:
             continue
@@ -159,8 +179,8 @@ async def duplicate_check_v2(
             in_intervals.append((inf.start_line, inf.end_line))
             db_intervals.append((int(p["start_line"]), int(p["end_line"])))
 
-        in_merged = merge_intervals(in_intervals)
-        db_merged = merge_intervals(db_intervals)
+        in_merged = merge_intervals(in_intervals, epsilon=2)
+        db_merged = merge_intervals(db_intervals, epsilon=2)
 
         covered = sum(e - s + 1 for s, e in in_merged)
         coverage = covered / total_lines if total_lines else 0.0
@@ -169,19 +189,23 @@ async def duplicate_check_v2(
 
         order = await CodeOrder.get(id=oid)
         suspicious_input_intervals.extend(in_merged)
+        
+        # 计算最长连续匹配
+        max_span = max([(e - s + 1) for s, e in in_merged]) if in_merged else 0
 
         details.append({
             "match_order_id": oid,
             "match_project": order.project_name,
             "hit_fingerprints": int(best_cnt),
             "coverage": f"{coverage*100:.2f}%",
+            "max_continuous_lines": max_span,
             "evidence": [
                 {"input_lines": f"{s1}-{e1}", "match_lines": f"{s2}-{e2}"}
                 for (s1, e1), (s2, e2) in list(zip(in_merged, db_merged))[:10]
             ],
         })
 
-    merged_all = merge_intervals(suspicious_input_intervals)
+    merged_all = merge_intervals(suspicious_input_intervals, epsilon=0)
     covered_all = sum(e - s + 1 for s, e in merged_all)
     dup_rate = covered_all / total_lines if total_lines else 0.0
 
@@ -189,7 +213,7 @@ async def duplicate_check_v2(
         "filename": file.filename,
         "total_lines": total_lines,
         "duplicate_rate": f"{dup_rate*100:.2f}%",
-        "details": details[:20],
+        "details": sorted(details, key=lambda x: x.get("max_continuous_lines", 0), reverse=True)[:20],
     }
 
 @app.post("/api/duplicate-check")

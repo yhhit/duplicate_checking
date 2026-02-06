@@ -49,6 +49,7 @@ _ID_RE = re.compile(r"\b[a-zA-Z_]\w*\b")
 _OP_RE = re.compile(r"==|!=|<=|>=|\+\+|--|\+=|-=|\*=|/=|&&|\|\||[+\-*/%<>=!(){}\[\].,;:]")
 
 def normalize_to_tokens_with_lines(code: str) -> Tuple[List[str], List[int]]:
+    # 移除注释
     code = re.sub(r"/\*.*?\*/", " ", code, flags=re.DOTALL)
     code = re.sub(r"//.*", " ", code)
     code = re.sub(r"#.*", " ", code)
@@ -57,6 +58,11 @@ def normalize_to_tokens_with_lines(code: str) -> Tuple[List[str], List[int]]:
     lines: List[int] = []
 
     for ln, line in enumerate(code.splitlines(), start=1):
+        # 预处理：跳过导入语句和空行，减少干扰
+        line_stripped = line.strip()
+        if not line_stripped or line_stripped.startswith(("import ", "from ", "include ", "#include")):
+            continue
+
         line = _STR_RE.sub(" STR ", line)
         line = _NUM_RE.sub(" NUM ", line)
 
@@ -74,11 +80,8 @@ def normalize_to_tokens_with_lines(code: str) -> Tuple[List[str], List[int]]:
                 w = m.group(0).lower()
                 if w in _KEYWORDS:
                     tok = w
-                elif w == "str":
-                    tok = "STR"
-                elif w == "num":
-                    tok = "NUM"
                 else:
+                    # 将所有非常量/关键字的标识符统一为 ID，增强抗混淆能力
                     tok = "ID"
                 tokens.append(tok)
                 lines.append(ln)
